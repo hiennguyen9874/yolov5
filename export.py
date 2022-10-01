@@ -144,7 +144,7 @@ def export_torchscript(model, im, file, optimize, prefix=colorstr("TorchScript:"
     return f, None
 
 
-# @try_export
+@try_export
 def export_onnx(
     model,
     im,
@@ -265,7 +265,7 @@ def export_onnx(
         except Exception as e:
             LOGGER.info(f"{prefix} simplifier failure: {e}")
 
-    if opt.cleanup:
+    if cleanup:
         try:
             print("\nStarting to cleanup ONNX using onnx_graphsurgeon...")
             import onnx_graphsurgeon as gs
