@@ -142,6 +142,8 @@ def run(
     plots=True,
     callbacks=Callbacks(),
     compute_loss=None,
+    bgr=False,
+    no_normalize=False,
 ):
     # Initialize/load model and set device
     training = model is not None
@@ -213,6 +215,7 @@ def run(
             rect=rect,
             workers=workers,
             prefix=colorstr(f"{task}: "),
+            bgr=bgr,
         )[0]
 
     seen = 0
@@ -235,7 +238,8 @@ def run(
                 im = im.to(device, non_blocking=True)
                 targets = targets.to(device)
             im = im.half() if half else im.float()  # uint8 to fp16/32
-            im /= 255  # 0 - 255 to 0.0 - 1.0
+            if not no_normalize:
+                im /= 255  # 0 - 255 to 0.0 - 1.0
             nb, _, height, width = im.shape  # batch size, channels, height, width
 
         # Inference
@@ -437,6 +441,8 @@ def parse_opt():
     )
     parser.add_argument("--half", action="store_true", help="use FP16 half-precision inference")
     parser.add_argument("--dnn", action="store_true", help="use OpenCV DNN for ONNX inference")
+    parser.add_argument("--bgr", action="store_true", help="use bgr image format")
+    parser.add_argument("--no-normalize", action="store_true", help="use bgr image format")
     opt = parser.parse_args()
     opt.data = check_yaml(opt.data)  # check YAML
     opt.save_json |= opt.data.endswith("coco.yaml")
