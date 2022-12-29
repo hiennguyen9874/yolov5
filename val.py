@@ -49,6 +49,7 @@ from utils.general import (
     colorstr,
     increment_path,
     non_max_suppression,
+    non_max_suppression_damo,
     print_args,
     scale_boxes,
     xywh2xyxy,
@@ -144,6 +145,7 @@ def run(
     compute_loss=None,
     bgr=False,
     no_normalize=False,
+    damo=False,
 ):
     # Initialize/load model and set device
     training = model is not None
@@ -256,14 +258,26 @@ def run(
             [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []
         )  # for autolabelling
         with dt[2]:
-            preds = non_max_suppression(
-                preds,
-                conf_thres,
-                iou_thres,
-                labels=lb,
-                multi_label=True,
-                agnostic=single_cls,
-                max_det=max_det,
+            preds = (
+                non_max_suppression(
+                    preds,
+                    conf_thres,
+                    iou_thres,
+                    labels=lb,
+                    multi_label=True,
+                    agnostic=single_cls,
+                    max_det=max_det,
+                )
+                if not damo
+                else non_max_suppression_damo(
+                    preds,
+                    conf_thres,
+                    iou_thres,
+                    labels=lb,
+                    multi_label=True,
+                    agnostic=single_cls,
+                    max_det=max_det,
+                )
             )
 
         # Metrics
@@ -443,6 +457,7 @@ def parse_opt():
     parser.add_argument("--dnn", action="store_true", help="use OpenCV DNN for ONNX inference")
     parser.add_argument("--bgr", action="store_true", help="use bgr image format")
     parser.add_argument("--no-normalize", action="store_true", help="use bgr image format")
+    parser.add_argument("--damo", action="store_true", help="Use for validation damo-yolo")
     opt = parser.parse_args()
     opt.data = check_yaml(opt.data)  # check YAML
     opt.save_json |= opt.data.endswith("coco.yaml")
