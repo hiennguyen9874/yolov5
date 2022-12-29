@@ -168,6 +168,7 @@ def create_dataloader(
     prefix="",
     shuffle=False,
     seed=0,
+    bgr=False,
 ):
     if rect and shuffle:
         LOGGER.warning(
@@ -188,6 +189,7 @@ def create_dataloader(
             pad=pad,
             image_weights=image_weights,
             prefix=prefix,
+            bgr=bgr,
         )
 
     batch_size = min(batch_size, len(dataset))
@@ -565,6 +567,7 @@ class LoadImagesAndLabels(Dataset):
         pad=0.0,
         min_items=0,
         prefix="",
+        bgr=False,
     ):
         self.img_size = img_size
         self.augment = augment
@@ -578,6 +581,7 @@ class LoadImagesAndLabels(Dataset):
         self.stride = stride
         self.path = path
         self.albumentations = Albumentations(size=img_size) if augment else None
+        self.bgr = bgr
 
         try:
             f = []  # image files
@@ -871,7 +875,10 @@ class LoadImagesAndLabels(Dataset):
             labels_out[:, 1:] = torch.from_numpy(labels)
 
         # Convert
-        img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
+        img = img.transpose((2, 0, 1))  # HWC to CHW
+        if not self.bgr:
+            img = img[::-1]  # BGR to RGB
+
         img = np.ascontiguousarray(img)
 
         return torch.from_numpy(img), labels_out, self.im_files[index], shapes

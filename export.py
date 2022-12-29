@@ -67,7 +67,7 @@ if str(ROOT) not in sys.path:
 if platform.system() != "Windows":
     ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
-from models.experimental import attempt_load
+from models.experimental import attempt_load, End2End
 from models.yolo import ClassificationModel, Detect, DetectionModel, SegmentationModel
 from utils.dataloaders import LoadImages
 from utils.general import (
@@ -146,7 +146,24 @@ def export_torchscript(model, im, file, optimize, prefix=colorstr("TorchScript:"
 
 
 @try_export
-def export_onnx(model, im, file, opset, dynamic, simplify, prefix=colorstr("ONNX:")):
+def export_onnx(
+    model,
+    im,
+    file,
+    opset,
+    dynamic,
+    simplify,
+    prefix=colorstr("ONNX:"),
+    cleanup=True,
+    end2end=False,
+    trt=False,
+    type_nms=0,
+    dynamic_batch=True,
+    iou_thres=0.25,
+    conf_thres=0.65,
+    topk_all=100,
+    device=torch.device("cpu"),
+):
     # YOLOv5 ONNX export
     check_requirements("onnx>=1.12.0")
     import onnx
@@ -154,29 +171,72 @@ def export_onnx(model, im, file, opset, dynamic, simplify, prefix=colorstr("ONNX
     LOGGER.info(f"\n{prefix} starting export with onnx {onnx.__version__}...")
     f = file.with_suffix(".onnx")
 
-    output_names = ["output0", "output1"] if isinstance(model, SegmentationModel) else ["output0"]
+    if isinstance(model, SegmentationModel):
+        output_names = ["output0", "output1"]
+    else:
+        if end2end:
+            if trt:
+                output_names = ["num_dets", "det_boxes", "det_scores", "det_classes"]
+            else:
+                output_names = ["output0"]
+        else:
+            output_names = ["output0"]
+
     if dynamic:
-        dynamic = {"images": {0: "batch", 2: "height", 3: "width"}}  # shape(1,3,640,640)
+        dynamic_axes = {"images": {0: "batch", 2: "height", 3: "width"}}  # shape(1,3,640,640)
         if isinstance(model, SegmentationModel):
-            dynamic["output0"] = {0: "batch", 1: "anchors"}  # shape(1,25200,85)
-            dynamic["output1"] = {
+            dynamic_axes["output0"] = {0: "batch", 1: "anchors"}  # shape(1,25200,85)
+            dynamic_axes["output1"] = {
                 0: "batch",
                 2: "mask_height",
                 3: "mask_width",
             }  # shape(1,32,160,160)
         elif isinstance(model, DetectionModel):
-            dynamic["output0"] = {0: "batch", 1: "anchors"}  # shape(1,25200,85)
+            dynamic_axes["output0"] = {0: "batch", 1: "anchors"}  # shape(1,25200,85)
+
+    if dynamic_batch:
+        dynamic_axes = {"images": {0: "batch"}}  # shape(1,3,640,640)
+        if isinstance(model, SegmentationModel):
+            raise NotImplementedError
+        elif isinstance(model, DetectionModel):
+            if end2end:
+                if trt:
+                    dynamic_axes.update(
+                        {
+                            "num_dets": {0: "batch"},
+                            "det_boxes": {0: "batch"},
+                            "det_scores": {0: "batch"},
+                            "det_classes": {0: "batch"},
+                        }
+                    )
+                else:
+                    dynamic_axes["output0"] = {0: "batch"}
+            else:
+                dynamic_axes["output0"] = {0: "batch"}
+
+    if end2end:
+        model = End2End(
+            model=model,
+            max_obj=topk_all,
+            iou_thres=iou_thres,
+            score_thres=conf_thres,
+            max_wh=max(im.shape[2:]),
+            device=torch.device("cpu") if (dynamic or dynamic_batch) else device,
+            n_classes=len(model.names),
+            type_nms=type_nms,
+            trt=trt,
+        )
 
     torch.onnx.export(
-        model.cpu() if dynamic else model,  # --dynamic only compatible with cpu
-        im.cpu() if dynamic else im,
+        model.cpu() if (dynamic or dynamic_batch) else model,  # --dynamic only compatible with cpu
+        im.cpu() if (dynamic or dynamic_batch) else im,
         f,
         verbose=False,
         opset_version=opset,
-        do_constant_folding=True,  # WARNING: DNN inference with torch>=1.12 may require do_constant_folding=False
+        do_constant_folding=True,
         input_names=["images"],
         output_names=output_names,
-        dynamic_axes=dynamic or None,
+        dynamic_axes=dynamic_axes if (dynamic or dynamic_batch) else None,
     )
 
     # Checks
@@ -184,7 +244,7 @@ def export_onnx(model, im, file, opset, dynamic, simplify, prefix=colorstr("ONNX
     onnx.checker.check_model(model_onnx)  # check onnx model
 
     # Metadata
-    d = {"stride": int(max(model.stride)), "names": model.names}
+    d = {"stride": int(max(model.model.stride if end2end else model.stride)), "names": model.model.names if end2end else model.names}
     for k, v in d.items():
         meta = model_onnx.metadata_props.add()
         meta.key, meta.value = k, str(v)
@@ -205,6 +265,19 @@ def export_onnx(model, im, file, opset, dynamic, simplify, prefix=colorstr("ONNX
             onnx.save(model_onnx, f)
         except Exception as e:
             LOGGER.info(f"{prefix} simplifier failure: {e}")
+
+    if cleanup:
+        try:
+            print("\nStarting to cleanup ONNX using onnx_graphsurgeon...")
+            import onnx_graphsurgeon as gs
+
+            graph = gs.import_onnx(model_onnx)
+            graph = graph.cleanup().toposort()
+            model_onnx = gs.export_onnx(graph)
+            onnx.save(model_onnx, f)
+        except Exception as e:
+            print(f"Cleanup failure: {e}")
+
     return f, model_onnx
 
 
@@ -301,7 +374,7 @@ def export_engine(
         model.model[-1].anchor_grid = grid
     else:  # TensorRT >= 8
         check_version(trt.__version__, "8.0.0", hard=True)  # require tensorrt>=8.0.0
-        export_onnx(model, im, file, 12, dynamic, simplify)  # opset 12
+        export_onnx(model, im, file, 12, False, dynamic, simplify)  # opset 12
     onnx = file.with_suffix(".onnx")
 
     LOGGER.info(f"\n{prefix} starting export with TensorRT {trt.__version__}...")
@@ -593,6 +666,11 @@ def run(
     topk_all=100,  # TF.js NMS: topk for all classes to keep
     iou_thres=0.45,  # TF.js NMS: IoU threshold
     conf_thres=0.25,  # TF.js NMS: confidence threshold
+    cleanup=True,
+    end2end=False,
+    trt=False,
+    type_nms=0,
+    dynamic_batch=False,
 ):
     t = time.time()
     include = [x.lower() for x in include]  # to lowercase
@@ -669,7 +747,23 @@ def run(
     if engine:  # TensorRT required before ONNX
         f[1], _ = export_engine(model, im, file, half, dynamic, simplify, workspace, verbose)
     if onnx or xml:  # OpenVINO requires ONNX
-        f[2], _ = export_onnx(model, im, file, opset, dynamic, simplify)
+        f[2], _ = export_onnx(
+            model,
+            im,
+            file,
+            opset,
+            dynamic,
+            simplify,
+            cleanup=cleanup,
+            end2end=end2end,
+            trt=trt,
+            type_nms=type_nms,
+            dynamic_batch=dynamic_batch,
+            iou_thres=iou_thres,
+            conf_thres=conf_thres,
+            topk_all=topk_all,
+            device=device,
+        )
     if xml:  # OpenVINO
         f[3], _ = export_openvino(file, metadata, half)
     if coreml:  # CoreML
@@ -781,6 +875,20 @@ def parse_opt():
         nargs="+",
         default=["torchscript"],
         help="torchscript, onnx, openvino, engine, coreml, saved_model, pb, tflite, edgetpu, tfjs, paddle",
+    )
+    parser.add_argument(
+        "--cleanup", action="store_true", help="ONNX: using onnx_graphsurgeon to cleanup"
+    )
+    parser.add_argument("--end2end", action="store_true", help="ONNX: add NMS to model")
+    parser.add_argument("--trt", action="store_true", help="ONNX: use to export trt")
+    parser.add_argument(
+        "--type-nms",
+        type=int,
+        default=0,
+        help="TensorRT: EfficientNMS (type-nms=0) or BatchedNMS(type-nms=1)",
+    )
+    parser.add_argument(
+        "--dynamic-batch", action="store_true", help="ONNX/TF/TensorRT: dynamic axes"
     )
     opt = parser.parse_args()
     print_args(vars(opt))
