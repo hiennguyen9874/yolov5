@@ -244,7 +244,10 @@ def export_onnx(
     onnx.checker.check_model(model_onnx)  # check onnx model
 
     # Metadata
-    d = {"stride": int(max(model.model.stride if end2end else model.stride)), "names": model.model.names if end2end else model.names}
+    d = {
+        "stride": int(max(model.model.stride if end2end else model.stride)),
+        "names": model.model.names if end2end else model.names,
+    }
     for k, v in d.items():
         meta = model_onnx.metadata_props.add()
         meta.key, meta.value = k, str(v)
